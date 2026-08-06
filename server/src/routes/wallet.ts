@@ -1,6 +1,6 @@
 import { Router, Request, Response, NextFunction } from "express";
 import pool from "../db";
-import { authenticate, AuthenticatedRequest } from "../middleware/authenticate";
+import { authenticate, AuthenticatedRequest } from "../middleware/auth";
 import { getWalletBalance } from "../services/stellar";
 
 const router = Router();

@@ -1,7 +1,7 @@
 import { Router, Request, Response, NextFunction } from "express";
 import { v4 as uuidv4 } from "uuid";
 import pool from "../db";
-import { authenticate, AuthenticatedRequest } from "../middleware/authenticate";
+import { authenticate, AuthenticatedRequest } from "../middleware/auth";
 import { validate } from "../middleware/validate";
 import { createListing, depositToEscrow } from "../services/stellar";
 import type { TradeOffer } from "../types/trade";

@@ -6,6 +6,7 @@ import morgan from "morgan";
 import tradesRouter from "./routes/trades";
 import authRouter from "./routes/auth";
 import walletRouter from "./routes/wallet";
+import adminRouter from "./routes/admin";
 
 // ---------------------------------------------------------------------------
 // Environment validation
@@ -74,6 +75,9 @@ app.use("/api/trades", tradesRouter);
 
 // Wallet routes (Stellar public key + balance)
 app.use("/api/wallet", walletRouter);
+
+// Admin routes — requires authenticate + authorize("admin")
+app.use("/api/admin", adminRouter);
 
 // ---------------------------------------------------------------------------
 // Global error handler

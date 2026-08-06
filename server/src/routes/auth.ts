@@ -142,11 +142,12 @@ router.post(
     // Look up the user and their pending OTP pin
     const { rows } = await pool.query<{
       id: string;
+      role: string;
       otp_pin_id: string | null;
       otp_expires_at: string | null;
       stellar_public_key: string | null;
     }>(
-      `SELECT u.id, u.otp_pin_id, u.otp_expires_at, w.stellar_public_key
+      `SELECT u.id, u.role, u.otp_pin_id, u.otp_expires_at, w.stellar_public_key
        FROM users u
        LEFT JOIN wallets w ON w.user_id = u.id
        WHERE u.phone = $1
@@ -230,17 +231,18 @@ router.post(
       }
     }
 
-    // Issue JWT — same payload shape the authenticate middleware expects
+    // Issue JWT — payload shape matches AuthPayload in middleware/auth.ts
     const secret = process.env["JWT_SECRET"]!;
+    const role = user.role ?? "user";
     const token = jwt.sign(
-      { sub: user.id, stellarPublicKey },
+      { sub: user.id, stellarPublicKey, role },
       secret,
       { expiresIn: "7d" }
     );
 
     res.status(200).json({
       token,
-      user: { id: user.id, phone, stellarPublicKey },
+      user: { id: user.id, phone, stellarPublicKey, role },
     });
   })
 );
