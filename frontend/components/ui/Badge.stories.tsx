@@ -1,3 +1,4 @@
+```tsx
 import type { Meta, StoryObj } from "@storybook/react";
 import { Badge } from "./Badge";
 
@@ -5,10 +6,22 @@ const meta: Meta<typeof Badge> = {
   title: "UI/Badge",
   component: Badge,
   tags: ["autodocs"],
+  parameters: {
+    a11y: {
+      test: "error",
+    },
+  },
   argTypes: {
     variant: {
       control: { type: "select" },
-      options: ["Open", "Locked", "Completed", "Cancelled", "Disputed"],
+      options: [
+        "Open",
+        "Active",
+        "Locked",
+        "Completed",
+        "Cancelled",
+        "Disputed",
+      ],
       description: "Trade lifecycle status variant",
     },
     showDot: {
@@ -28,6 +41,12 @@ type Story = StoryObj<typeof Badge>;
 export const Open: Story = {
   args: {
     variant: "Open",
+  },
+};
+
+export const Active: Story = {
+  args: {
+    variant: "Active",
   },
 };
 
@@ -59,6 +78,7 @@ export const AllStatuses: Story = {
   render: () => (
     <div className="flex flex-wrap items-center gap-3">
       <Badge variant="Open" />
+      <Badge variant="Active" />
       <Badge variant="Locked" />
       <Badge variant="Completed" />
       <Badge variant="Cancelled" />
@@ -66,3 +86,4 @@ export const AllStatuses: Story = {
     </div>
   ),
 };
+```
