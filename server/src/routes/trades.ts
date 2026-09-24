@@ -25,6 +25,15 @@ import {
   type CreateRatingInput,
 } from "../schemas";
 
+/**
+ * A trade as it appears in the public listing feed. `seller_id` is deliberately
+ * omitted — a listing represents its seller only by an opaque `seller_handle`,
+ * so cards cannot be correlated back to a UUID (issue #330).
+ */
+export type PublicTradeOffer = Omit<TradeOffer, "seller_id"> & {
+  seller_handle: string | null;
+};
+
 const router = Router();
 
 // ---------------------------------------------------------------------------
@@ -46,13 +55,31 @@ router.get(
     const { page, limit } = parsed.data;
     const offset = (page - 1) * limit;
 
+    // Public feed: the seller is exposed only as an opaque display handle.
+    // `seller_id` is intentionally not selected (issue #330).
     const { rows: trades } = await pool.query<
-      TradeOffer & { seller_average_rating: number; seller_review_count: number }
+      PublicTradeOffer & {
+        seller_average_rating: number;
+        seller_review_count: number;
+      }
     >(
-      `SELECT t.*,
+      `SELECT t.id,
+              t.buyer_id,
+              t.asset_type,
+              t.amount,
+              t.fee_amount,
+              t.seller_net_amount,
+              t.status,
+              t.contract_listing_id,
+              t.escrow_tx_hash,
+              t.expires_at,
+              t.created_at,
+              t.updated_at,
+              u.display_handle AS seller_handle,
               COALESCE(sr.avg_stars, 0)::float8 AS seller_average_rating,
               COALESCE(sr.review_count, 0)::int AS seller_review_count
        FROM trade_offers t
+       LEFT JOIN users u ON u.id = t.seller_id
        LEFT JOIN LATERAL (
          SELECT AVG(stars)::numeric(4,2) AS avg_stars, COUNT(*)::int AS review_count
          FROM ratings
@@ -144,9 +171,18 @@ router.get(
   async (req, res) => {
     const { id } = req.params;
 
-    const { rows } = await pool.query<TradeOffer>(
-      `SELECT *, fee_amount AS "feeAmount", seller_net_amount AS "sellerNetAmount"
-         FROM trade_offers WHERE id = $1`,
+    // The detail view keeps `seller_id` (the UI needs it for ownership) but
+    // also returns the opaque display handle for rendering (issue #330).
+    const { rows } = await pool.query<
+      TradeOffer & { seller_handle: string | null }
+    >(
+      `SELECT t.*,
+              t.fee_amount AS "feeAmount",
+              t.seller_net_amount AS "sellerNetAmount",
+              u.display_handle AS seller_handle
+         FROM trade_offers t
+         LEFT JOIN users u ON u.id = t.seller_id
+        WHERE t.id = $1`,
       [id]
     );
 

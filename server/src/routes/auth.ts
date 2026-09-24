@@ -31,6 +31,7 @@ import {
   redeemRecoveryCode,
 } from "../services/recoveryCodes";
 import { provisionVirtualAccountForUser } from "../services/virtualAccount";
+import { generateDisplayHandle } from "../utils/displayHandle";
 
 const router = Router();
 
@@ -125,12 +126,15 @@ router.post(
   async (req, res) => {
     const { phone, referralCode } = req.body as RequestOtpInput;
 
-    // Upsert user row — create if first time, leave existing data untouched
+    // Upsert user row — create if first time, leave existing data untouched.
+    // The display handle is derived from the generated id, so it is stable for
+    // the user and hides the UUID on public trade listings (issue #330).
+    const userId = uuidv4();
     await pool.query(
-      `INSERT INTO users (id, phone, referral_code)
-       VALUES ($1, $2, $3)
+      `INSERT INTO users (id, phone, referral_code, display_handle)
+       VALUES ($1, $2, $3, $4)
        ON CONFLICT (phone) DO NOTHING`,
-      [uuidv4(), phone, newReferralCode()]
+      [userId, phone, newReferralCode(), generateDisplayHandle(userId)]
     );
 
     if (referralCode) {
