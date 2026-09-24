@@ -42,6 +42,10 @@ router.get(
     const { page, limit } = parsed.data;
     const offset = (page - 1) * limit;
 
+    // Join ratings on reviewee_display_id so the count survives account
+    // anonymisation (issue #362).  The display_id is captured at rating
+    // creation time and is never modified by the anonymisation job, unlike
+    // the raw UUID which becomes a dangling reference once PII is scrubbed.
     const { rows: trades } = await pool.query<
       TradeOffer & { seller_average_rating: number; seller_review_count: number }
     >(
@@ -52,7 +56,7 @@ router.get(
        LEFT JOIN LATERAL (
          SELECT AVG(stars)::numeric(4,2) AS avg_stars, COUNT(*)::int AS review_count
          FROM ratings
-         WHERE reviewee_id = t.seller_id
+         WHERE reviewee_display_id = t.seller_id::text
        ) sr ON TRUE
        WHERE t.status = 'Active' AND t.expires_at > NOW()
        ORDER BY t.created_at DESC
@@ -391,12 +395,29 @@ router.post(
       return;
     }
 
+    // Resolve the seller's stable display identifier at rating creation time.
+    // We capture it now so the rating remains retrievable even after the
+    // seller's account is anonymised and their phone is replaced with a hash
+    // (issue #362).  The display_id is the seller's phone (or the anonymised
+    // hash if the account has already been scrubbed) — it never changes after
+    // it is written here, giving the LATERAL join in GET /trades a stable key.
+    const { rows: sellerRows } = await pool.query<{ phone: string }>(
+      `SELECT phone FROM users WHERE id = $1 LIMIT 1`,
+      [trade.seller_id]
+    );
+
+    // Fall back to the raw UUID text if the seller row has somehow been
+    // removed — this should not happen due to FK CASCADE, but guards against
+    // a split-second race between deletion and rating.
+    const revieweeDisplayId =
+      sellerRows[0]?.phone?.trim() || trade.seller_id;
+
     try {
       const { rows } = await pool.query(
-        `INSERT INTO ratings (trade_id, reviewer_id, reviewee_id, stars, comment)
-         VALUES ($1, $2, $3, $4, $5)
+        `INSERT INTO ratings (trade_id, reviewer_id, reviewee_id, reviewee_display_id, stars, comment)
+         VALUES ($1, $2, $3, $4, $5, $6)
          RETURNING *`,
-        [tradeId, reviewerId, trade.seller_id, stars, comment ?? null]
+        [tradeId, reviewerId, trade.seller_id, revieweeDisplayId, stars, comment ?? null]
       );
 
       res.status(201).json({ data: rows[0] });
