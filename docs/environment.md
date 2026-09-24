@@ -28,6 +28,8 @@ The server **will not start** if any of these are missing:
 | `NODE_ENV` | `development` | Set to `production` in deployed environments. Affects morgan log format and other behaviour. |
 | `CORS_ORIGIN` | `*` | Allowed CORS origin. Set to your frontend URL in production, e.g. `https://airflex.app`. |
 | `PLATFORM_FEE_PERCENT` | `1.5` | Percentage deducted from each completed trade. |
+| `RELEASE_RETRY_MAX` | `3` | Maximum number of delivery verification retry attempts before escalating to Disputed. |
+| `RELEASE_RETRY_BASE_DELAY_MS` | `2000` | Base delay in milliseconds for exponential backoff and retry jitter. |
 
 ### Database
 
