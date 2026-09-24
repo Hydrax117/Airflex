@@ -1,9 +1,7 @@
 import { Pool } from "pg";
 
-// Validate DATABASE_URL before creating pool
-if (!process.env["DATABASE_URL"]) {
-  throw new Error("DATABASE_URL environment variable is required");
-}
+// Shared PostgreSQL connection pool configuration
+
 
 /**
  * Shared PostgreSQL connection pool.

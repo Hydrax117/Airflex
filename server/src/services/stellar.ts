@@ -57,10 +57,10 @@ const NETWORK_PASSPHRASE =
     : Networks.TESTNET;
 
 const HORIZON_URL =
-  process.env["HORIZON_URL"] ?? "https://horizon-testnet.stellar.org";
+  process.env["HORIZON_URL"] || "https://horizon-testnet.stellar.org";
 
 const SOROBAN_RPC_URL =
-  process.env["SOROBAN_RPC_URL"] ?? "https://soroban-testnet.stellar.org";
+  process.env["SOROBAN_RPC_URL"] || "https://soroban-testnet.stellar.org";
 
 const horizonServer = new Horizon.Server(HORIZON_URL, { allowHttp: false });
 const sorobanServer = new SorobanRpc.Server(SOROBAN_RPC_URL, {
