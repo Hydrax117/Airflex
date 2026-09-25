@@ -216,7 +216,8 @@ export default function TradeDetailClient({ trade }: Props) {
     status === "Completed" &&
     Date.now() - new Date(trade.updated_at).getTime() < RATING_WINDOW_MS;
 
-  const sellerAlias = `@seller_${trade.seller_id.slice(-8)}`;
+  // Render the opaque display handle — never the seller's UUID (issue #330).
+  const sellerAlias = trade.seller_handle ?? "@airflex";
 
   /** Sends the user back through authentication, returning here afterwards. */
   function reauthenticate() {

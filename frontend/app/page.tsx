@@ -49,7 +49,9 @@ function AssetBadge({ assetType }: { assetType: string }) {
 }
 
 function TradeCard({ trade, t }: { trade: TradeOffer; t: HomeTranslator }) {
-  const sellerAlias = `@seller_${trade.seller_id.slice(-8)}`;
+  // The listing feed exposes an opaque display handle instead of the seller's
+  // UUID, so cards cannot be correlated by a slice of the id (issue #330).
+  const sellerAlias = trade.seller_handle ?? "@airflex";
   return (
     <Card className="flex flex-col gap-4 transition-shadow hover:shadow-md">
       <div className="flex items-start justify-between gap-2">

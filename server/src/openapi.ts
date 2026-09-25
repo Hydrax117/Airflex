@@ -216,7 +216,6 @@ export const openApiDocument = {
         type: "object",
         required: [
           "id",
-          "seller_id",
           "asset_type",
           "amount",
           "status",
@@ -226,7 +225,22 @@ export const openApiDocument = {
         ],
         properties: {
           id: { type: "string", format: "uuid" },
-          seller_id: { type: "string", format: "uuid" },
+          seller_id: {
+            type: "string",
+            format: "uuid",
+            nullable: true,
+            description:
+              "Seller UUID. Present on detail/create responses but omitted " +
+              "from the public listing feed, which exposes `seller_handle` instead (issue #330).",
+          },
+          seller_handle: {
+            type: "string",
+            nullable: true,
+            example: "@airflex_2f9a",
+            description:
+              "Opaque, deterministic seller label derived from the user id. " +
+              "Included on the public listing feed instead of `seller_id` (issue #330).",
+          },
           buyer_id: {
             type: ["string", "null"],
             format: "uuid",
