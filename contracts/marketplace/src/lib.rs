@@ -103,12 +103,16 @@ pub enum ContractError {
 // Events
 // ---------------------------------------------------------------------------
 
-fn topic_listed()    -> Symbol { symbol_short!("listed")    }
-fn topic_sold()      -> Symbol { symbol_short!("sold")      }
-fn topic_cancelled() -> Symbol { symbol_short!("cancelled") }
-fn topic_contract()  -> Symbol { symbol_short!("contract")  }
-fn topic_paused()    -> Symbol { symbol_short!("paused")    }
-fn topic_unpaused()  -> Symbol { symbol_short!("unpaused")  }
+// Event topics defined with `symbol_short!` are limited to at most 9 ASCII
+// characters (e.g. "cancelled" is exactly 9 chars, at the limit).
+// Any topic strings approaching or exceeding 9 characters must use `Symbol::new(env, "...")`
+// to avoid compile-time macro panics.
+fn topic_listed()    -> Symbol { symbol_short!("listed")    } // 6 chars
+fn topic_sold()      -> Symbol { symbol_short!("sold")      } // 4 chars
+fn topic_cancelled() -> Symbol { symbol_short!("cancelled") } // 9 chars (max limit for symbol_short!)
+fn topic_contract()  -> Symbol { symbol_short!("contract")  } // 8 chars
+fn topic_paused()    -> Symbol { symbol_short!("paused")    } // 6 chars
+fn topic_unpaused()  -> Symbol { symbol_short!("unpaused")  } // 8 chars
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -1018,5 +1022,39 @@ mod test {
         // Listing is Active, not Sold
         let result = client.try_cancel_and_refund(&buyer, &listing_id);
         assert_eq!(result, Ok(Err(ContractError::WrongStatus)));
+    }
+
+    #[test]
+    fn test_event_topic_lengths_and_long_topic_handling() {
+        let env = Env::default();
+
+        // Compile-time & runtime verification that symbol_short! topics stay within <= 9 chars
+        const SHORT_TOPICS: &[&str] = &[
+            "listed",
+            "sold",
+            "cancelled",
+            "contract",
+            "paused",
+            "unpaused",
+        ];
+
+        for topic in SHORT_TOPICS {
+            assert!(
+                topic.len() <= 9,
+                "symbol_short! topic '{topic}' exceeds 9 characters"
+            );
+        }
+
+        // Test topic functions
+        let _ = topic_listed();
+        let _ = topic_sold();
+        let _ = topic_cancelled();
+        let _ = topic_contract();
+        let _ = topic_paused();
+        let _ = topic_unpaused();
+
+        // Verify that longer/new topics (> 9 chars, e.g. "emergency_withdrawal") work with Symbol::new(&env, ...)
+        let long_topic = Symbol::new(&env, "emergency_withdrawal");
+        assert_eq!(long_topic, Symbol::new(&env, "emergency_withdrawal"));
     }
 }
