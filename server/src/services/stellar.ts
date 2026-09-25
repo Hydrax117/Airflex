@@ -58,10 +58,10 @@ const NETWORK_PASSPHRASE =
     : Networks.TESTNET;
 
 const HORIZON_URL =
-  process.env["HORIZON_URL"] ?? "https://horizon-testnet.stellar.org";
+  process.env["HORIZON_URL"] || "https://horizon-testnet.stellar.org";
 
 const SOROBAN_RPC_URL =
-  process.env["SOROBAN_RPC_URL"] ?? "https://soroban-testnet.stellar.org";
+  process.env["SOROBAN_RPC_URL"] || "https://soroban-testnet.stellar.org";
 
 const horizonServer = new Horizon.Server(HORIZON_URL, { allowHttp: false });
 const sorobanServer = new SorobanRpc.Server(SOROBAN_RPC_URL, {
@@ -194,6 +194,59 @@ export async function getWalletBalance(publicKey: string): Promise<string> {
       return "0";
     }
     throw err;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Server signing key — resolved and validated once, not on every call
+// ---------------------------------------------------------------------------
+//
+// `releasePayment` and `resolveDispute` both sign with the platform's admin
+// key. Previously each call re-read STELLAR_SERVER_SECRET from process.env
+// and re-validated it was present via `Keypair.fromSecret`, so a missing or
+// malformed key would only surface the first time a trade actually needed
+// releasing/resolving — in production, under live traffic — rather than at
+// startup. `getServerKeypair()` resolves and parses the key exactly once and
+// caches the result; every subsequent call reuses the cached Keypair instead
+// of touching the environment again.
+let cachedServerKeypair: Keypair | null = null;
+
+function getServerKeypair(): Keypair {
+  if (cachedServerKeypair) {
+    return cachedServerKeypair;
+  }
+
+  const serverSecret = process.env["STELLAR_SERVER_SECRET"];
+  if (!serverSecret) {
+    throw new Error("STELLAR_SERVER_SECRET environment variable is not set");
+  }
+
+  try {
+    cachedServerKeypair = Keypair.fromSecret(serverSecret);
+  } catch (err) {
+    throw new Error(
+      `STELLAR_SERVER_SECRET is not a valid Stellar secret key: ${(err as Error).message}`
+    );
+  }
+
+  return cachedServerKeypair;
+}
+
+const isTestEnv =
+  process.env["NODE_ENV"] === "test" || process.env["JEST_WORKER_ID"] !== undefined;
+
+// Resolve (and validate) the server key as soon as this module loads, rather
+// than waiting for the first releasePayment/resolveDispute call, so a
+// misconfigured deployment is visible in startup logs immediately. This only
+// warns (never throws/exits) — server/src/index.ts's own REQUIRED_ENV_VARS
+// check is what actually fails startup for a missing STELLAR_SERVER_SECRET;
+// this mirrors the same non-fatal pattern used in config/contracts.ts for
+// missing contract IDs.
+if (!isTestEnv) {
+  try {
+    getServerKeypair();
+  } catch (err) {
+    console.warn(`[stellar] ${(err as Error).message}`);
   }
 }
 
@@ -437,11 +490,6 @@ export async function releasePayment(contractTradeId: string): Promise<string> {
     );
   }
 
-  const serverSecret = process.env["STELLAR_SERVER_SECRET"];
-  if (!serverSecret) {
-    throw new Error("STELLAR_SERVER_SECRET environment variable is not set");
-  }
-
   const tracer = getTracer();
   return tracer.startActiveSpan("soroban.release_payment", async (span: Span) => {
     span.setAttribute("soroban.contract_id", contractAddress);
@@ -450,8 +498,8 @@ export async function releasePayment(contractTradeId: string): Promise<string> {
     span.setAttribute("trade.contract_trade_id", contractTradeId);
 
     try {
-      // Derive keypair from server secret — never log this object
-      const keypair = Keypair.fromSecret(serverSecret);
+      // Cached keypair, resolved and validated once — never log this object
+      const keypair = getServerKeypair();
       const serverPublicKey = keypair.publicKey();
 
       const account = await horizonServer.loadAccount(serverPublicKey);
@@ -524,13 +572,8 @@ export async function resolveDispute(params: {
     throw new Error("ESCROW_CONTRACT_ADDRESS environment variable is not set");
   }
 
-  const serverSecret = process.env["STELLAR_SERVER_SECRET"];
-  if (!serverSecret) {
-    throw new Error("STELLAR_SERVER_SECRET environment variable is not set");
-  }
-
-  // Derive keypair from server secret — never log this object
-  const keypair = Keypair.fromSecret(serverSecret);
+  // Cached keypair, resolved and validated once — never log this object
+  const keypair = getServerKeypair();
   const serverPublicKey = keypair.publicKey();
 
   const account = await horizonServer.loadAccount(serverPublicKey);

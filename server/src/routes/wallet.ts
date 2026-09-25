@@ -93,8 +93,12 @@ async function resolvePaystackAccount(
       span.setAttribute("paystack.bank_code", bankCode);
       // Do NOT record the account_number — it is PII
       try {
+        const params = new URLSearchParams({
+          account_number: accountNumber,
+          bank_code: bankCode,
+        });
         const response = await fetch(
-          `https://api.paystack.co/bank/resolve?account_number=${accountNumber}&bank_code=${bankCode}`,
+          `https://api.paystack.co/bank/resolve?${params.toString()}`,
           {
             headers: { Authorization: `Bearer ${paystackSecretKey}` },
           }

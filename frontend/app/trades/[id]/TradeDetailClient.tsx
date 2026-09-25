@@ -18,6 +18,10 @@ import { Spinner } from "../../../components/ui/Spinner";
 import { Card } from "../../../components/ui/Card";
 import { Toast } from "../../../components/ui/Toast";
 import { StellarExplorerLink } from "../../../components/StellarExplorerLink";
+import {
+  EscrowTransactionLink,
+  shouldShowEscrowLink,
+} from "../../../components/EscrowTransactionLink";
 import { DisputeModal } from "./dispute/DisputeModal";
 
 // ---------------------------------------------------------------------------
@@ -139,7 +143,7 @@ function ConfirmationPanel({ trade, txHash }: { trade: TradeOffer; txHash: strin
         </DetailRow>
         {txHash && (
           <DetailRow label={t("escrowTx")}>
-            <StellarExplorerLink type="transaction" value={txHash} />
+            <EscrowTransactionLink status="Locked" escrowTxHash={txHash} />
           </DetailRow>
         )}
       </dl>
@@ -439,13 +443,12 @@ export default function TradeDetailClient({ trade }: Props) {
             />
           </DetailRow>
 
-          {/* Escrow Tx Deep-Link if present */}
-          {trade.escrow_tx_hash && (
+          {/* Escrow Tx Deep-Link (Issue #332)
+              Uses the live `status`, not `trade.status`, so a buyer who has
+              just purchased sees the proof without a page reload. */}
+          {shouldShowEscrowLink(status, trade.escrow_tx_hash) && (
             <DetailRow label="Escrow Transaction">
-              <StellarExplorerLink
-                type="transaction"
-                value={trade.escrow_tx_hash}
-              />
+              <EscrowTransactionLink status={status} escrowTxHash={trade.escrow_tx_hash} />
             </DetailRow>
           )}
         </dl>

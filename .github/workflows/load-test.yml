@@ -41,16 +41,17 @@ jobs:
         run: bash tests/load/run-all.sh
 
       - name: Upload k6 summaries
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: k6-load-results
           path: load-results/*.json
 
-      - name: Post summary table
-        run: node tests/load/format-summary.mjs >> "$GITHUB_STEP_SUMMARY"
+      - name: Compare against baseline and check regressions
+        run: node tests/load/compare-baseline.mjs >> "$GITHUB_STEP_SUMMARY"
 
       - name: Comment on PR (when triggered from a PR branch)
-        if: github.event_name == 'workflow_dispatch'
+        if: always() && github.event_name == 'workflow_dispatch'
         uses: actions/github-script@v7
         with:
           script: |

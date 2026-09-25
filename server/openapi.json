@@ -554,6 +554,10 @@
               "stellarPublicKey": {
                 "type": "string",
                 "example": "GABC1234..."
+              },
+              "referralCode": {
+                "type": "string",
+                "example": "ABC12345"
               }
             }
           }

@@ -79,3 +79,24 @@ export const paginationSchema = z.object({
 });
 
 export type PaginationInput = z.infer<typeof paginationSchema>;
+
+// ---------------------------------------------------------------------------
+
+/**
+ * Schema for POST /api/v1/trades/:id/dispute
+ *
+ * Previously this validation (required, non-empty, <= 500 chars) lived
+ * inline in the route handler instead of as a Zod schema like every other
+ * validated endpoint, which meant it wasn't discoverable from src/schemas/
+ * and couldn't be reused for OpenAPI documentation the way the other request
+ * bodies are.
+ */
+export const disputeSchema = z.object({
+  reason: z
+    .string({ required_error: "Dispute reason is required" })
+    .trim()
+    .min(1, "Dispute reason is required")
+    .max(500, "Dispute reason cannot exceed 500 characters"),
+});
+
+export type DisputeInput = z.infer<typeof disputeSchema>;

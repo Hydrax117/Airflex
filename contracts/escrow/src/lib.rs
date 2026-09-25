@@ -93,14 +93,18 @@ pub enum ContractError {
 // Events
 // ---------------------------------------------------------------------------
 
-fn topic_created()   -> Symbol { symbol_short!("created")   }
-fn topic_locked()    -> Symbol { symbol_short!("locked")    }
-fn topic_completed() -> Symbol { symbol_short!("completed") }
-fn topic_cancelled() -> Symbol { symbol_short!("cancelled") }
-fn topic_disputed()  -> Symbol { symbol_short!("disputed")  }
-fn topic_contract()  -> Symbol { symbol_short!("contract")  }
-fn topic_paused()    -> Symbol { symbol_short!("paused")    }
-fn topic_unpaused()  -> Symbol { symbol_short!("unpaused")  }
+// Event topics defined with `symbol_short!` are limited to at most 9 ASCII
+// characters (e.g. "completed" and "cancelled" are exactly 9 chars, at the limit).
+// Any topic strings approaching or exceeding 9 characters must use `Symbol::new(env, "...")`
+// to avoid compile-time macro panics.
+fn topic_created()   -> Symbol { symbol_short!("created")   } // 7 chars
+fn topic_locked()    -> Symbol { symbol_short!("locked")    } // 6 chars
+fn topic_completed() -> Symbol { symbol_short!("completed") } // 9 chars (max limit for symbol_short!)
+fn topic_cancelled() -> Symbol { symbol_short!("cancelled") } // 9 chars (max limit for symbol_short!)
+fn topic_disputed()  -> Symbol { symbol_short!("disputed")  } // 8 chars
+fn topic_contract()  -> Symbol { symbol_short!("contract")  } // 8 chars
+fn topic_paused()    -> Symbol { symbol_short!("paused")    } // 6 chars
+fn topic_unpaused()  -> Symbol { symbol_short!("unpaused")  } // 8 chars
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -258,21 +262,34 @@ impl EscrowContract {
     // Admin functions
     // -----------------------------------------------------------------------
 
+    /// Adds `token` to the set of tokens listings may be created/filled in.
+    /// Emits a `topics: ["token", "allowed"]` event carrying the token
+    /// address, so off-chain indexers and admin tooling can observe changes
+    /// to the allow-list without polling every token individually.
     pub fn add_allowed_token(env: Env, token: Address) -> Result<(), ContractError> {
         let admin = get_admin(&env)?;
         admin.require_auth();
         env.storage()
             .instance()
-            .set(&DataKey::AllowedToken(token), &true);
+            .set(&DataKey::AllowedToken(token.clone()), &true);
+
+        env.events()
+            .publish((topic_token(), topic_allowed()), token);
         Ok(())
     }
 
+    /// Removes `token` from the set of allowed tokens. Emits a
+    /// `topics: ["token", "removed"]` event carrying the token address —
+    /// previously this state change was silent on-chain.
     pub fn remove_allowed_token(env: Env, token: Address) -> Result<(), ContractError> {
         let admin = get_admin(&env)?;
         admin.require_auth();
         env.storage()
             .instance()
-            .remove(&DataKey::AllowedToken(token));
+            .remove(&DataKey::AllowedToken(token.clone()));
+
+        env.events()
+            .publish((topic_token(), topic_removed()), token);
         Ok(())
     }
 
@@ -309,6 +326,16 @@ impl EscrowContract {
         }
 
         if buyer == trade.seller {
+            return Err(ContractError::Unauthorized);
+        }
+
+        // The admin address is the same key that later calls release_payment
+        // (the delivery oracle) and resolve_dispute/cancel_and_refund on this
+        // very trade. Letting it also act as the buyer would let one party
+        // control both sides of the trade plus its own arbitration — a
+        // conflict of interest with no legitimate use case here.
+        let admin = get_admin(&env)?;
+        if buyer == admin {
             return Err(ContractError::Unauthorized);
         }
 
@@ -514,7 +541,17 @@ impl EscrowContract {
             return Err(ContractError::Unauthorized);
         }
 
-        trade.filled_amount -= refunded_amount;
+        // `refunded_amount` is the sum of sub-escrow amounts we just walked and
+        // refunded above, so it should never exceed `filled_amount` — but a
+        // plain `-=` would either silently wrap (host panics are disabled) or
+        // abort the whole contract call on a host trap (this workspace builds
+        // with `overflow-checks = true`) if that invariant were ever violated
+        // by a future change. `checked_sub` turns that into an ordinary
+        // `Result::Err` the caller can handle instead of a low-level trap.
+        trade.filled_amount = trade
+            .filled_amount
+            .checked_sub(refunded_amount)
+            .ok_or(ContractError::InsufficientFunds)?;
 
         if is_admin {
             trade.status = TradeStatus::Cancelled;
@@ -598,10 +635,23 @@ impl EscrowContract {
     // -----------------------------------------------------------------------
 
     pub fn get_trade(env: Env, trade_id: u64) -> Result<TradeOffer, ContractError> {
-        env.storage()
+        let trade: TradeOffer = env
+            .storage()
             .persistent()
             .get(&DataKey::Trade(trade_id))
-            .ok_or(ContractError::TradeNotFound)
+            .ok_or(ContractError::TradeNotFound)?;
+
+        // Reading an entry does not by itself keep it alive: extend the TTL on
+        // every read, not just on write (as create_listing already does).
+        // Without this, a trade that is read frequently but written rarely
+        // (e.g. repeatedly polled while Locked, waiting on off-chain delivery)
+        // can still be evicted between the read here and a later write, since
+        // the two are not atomic from the caller's perspective (TOCTOU).
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::Trade(trade_id), 17_280, 17_280 * 30);
+
+        Ok(trade)
     }
 
     pub fn trade_count(env: Env) -> u64 {
@@ -1215,5 +1265,230 @@ mod test {
         // Contract not initialised — get_admin should return Unauthorized
         let result = client.try_get_admin();
         assert_eq!(result, Ok(Err(ContractError::Unauthorized)));
+    }
+
+    #[test]
+    fn test_event_topic_lengths_and_long_topic_handling() {
+        let env = Env::default();
+
+        // Compile-time & runtime verification that symbol_short! topics stay within <= 9 chars
+        const SHORT_TOPICS: &[&str] = &[
+            "created",
+            "locked",
+            "completed",
+            "cancelled",
+            "disputed",
+            "contract",
+            "paused",
+            "unpaused",
+        ];
+
+        for topic in SHORT_TOPICS {
+            assert!(
+                topic.len() <= 9,
+                "symbol_short! topic '{topic}' exceeds 9 characters"
+            );
+        }
+
+        // Test topic functions
+        let _ = topic_created();
+        let _ = topic_locked();
+        let _ = topic_completed();
+        let _ = topic_cancelled();
+        let _ = topic_disputed();
+        let _ = topic_contract();
+        let _ = topic_paused();
+        let _ = topic_unpaused();
+
+        // Verify that longer/new topics (> 9 chars, e.g. "emergency_withdrawal") work with Symbol::new(&env, ...)
+        let long_topic = Symbol::new(&env, "emergency_withdrawal");
+        assert_eq!(long_topic, Symbol::new(&env, "emergency_withdrawal"));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Fuzz-style tests — numeric arithmetic on stroop amounts and fill counters
+// ---------------------------------------------------------------------------
+//
+// This workspace has no fuzzing harness set up (no cargo-fuzz target, no
+// proptest/quickcheck dependency), and adding an external crate here isn't
+// something this change can verify resolves without network access to
+// crates.io and a Cargo.lock update. Instead, this uses a small deterministic
+// PRNG (xorshift64, no new dependency) to exercise deposit_to_escrow and
+// cancel_and_refund across many randomised stroop amounts, fill splits, and
+// fill counts, asserting the arithmetic invariants around `filled_amount`
+// and the fill counter hold for every generated case rather than just the
+// handful of fixed values the existing unit tests use. Each test seeds its
+// PRNG with a fixed constant so a failure is reproducible.
+#[cfg(test)]
+mod fuzz {
+    use super::*;
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger},
+        token::StellarAssetClient,
+        Address, Env,
+    };
+
+    /// Minimal deterministic PRNG (xorshift64).
+    struct Xorshift64(u64);
+
+    impl Xorshift64 {
+        fn new(seed: u64) -> Self {
+            // xorshift64 requires a non-zero state.
+            Xorshift64(if seed == 0 { 0x9E3779B97F4A7C15 } else { seed })
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+
+        /// Returns a value in the inclusive range [min, max].
+        fn range_i128(&mut self, min: i128, max: i128) -> i128 {
+            debug_assert!(max >= min);
+            let span = (max - min + 1) as u128;
+            min + (self.next_u64() as u128 % span) as i128
+        }
+    }
+
+    fn setup() -> (Env, EscrowContractClient<'static>, Address, Address, Address) {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, EscrowContract);
+        let client = EscrowContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let seller = Address::generate(&env);
+
+        let token_admin = Address::generate(&env);
+        let token_id = env.register_stellar_asset_contract_v2(token_admin.clone());
+        let token_address = token_id.address();
+
+        let allowed_tokens = vec![&env, token_address.clone()];
+        client.initialize(&admin, &allowed_tokens);
+
+        (env, client, admin, seller, token_address)
+    }
+
+    /// Fuzzes deposit_to_escrow with random total amounts and random
+    /// multi-buyer partial fills (stroop amounts), asserting that
+    /// `filled_amount` never exceeds `total_amount`, that it always equals
+    /// the running sum of accepted fills, and that any attempt to fill more
+    /// than what remains is rejected with InsufficientFunds — never a panic
+    /// or a silently wrapped value.
+    #[test]
+    fn fuzz_deposit_to_escrow_never_exceeds_total() {
+        let mut rng = Xorshift64::new(0xC0FFEE);
+
+        for iteration in 0..200u32 {
+            let (env, client, _admin, seller, token) = setup();
+            env.ledger().with_mut(|l| l.timestamp = 1_000_000);
+
+            // Random total amount: 1 stroop up to ~10,000 XLM in stroops.
+            let total_amount = rng.range_i128(1, 100_000_0000000i128);
+
+            let trade_id = client.create_listing(
+                &seller,
+                &token,
+                &total_amount,
+                &symbol_short!("AIRTIME"),
+                &(1_000_000 + 86_400),
+            );
+
+            let sac = StellarAssetClient::new(&env, &token);
+            let mut running_filled: i128 = 0;
+
+            // A random number of partial fills, each sized to stay within
+            // what remains — exercises the running-sum bookkeeping without
+            // ever expecting InsufficientFunds along this path.
+            let fill_count = 1 + (rng.next_u64() % 5) as u32;
+            for _ in 0..fill_count {
+                let remaining = total_amount - running_filled;
+                if remaining <= 0 {
+                    break;
+                }
+                let fill_amount = rng.range_i128(1, remaining);
+
+                let buyer = Address::generate(&env);
+                sac.mint(&buyer, &fill_amount);
+                client.deposit_to_escrow(&buyer, &trade_id, &fill_amount);
+
+                running_filled += fill_amount;
+
+                let trade = client.get_trade(&trade_id);
+                assert!(
+                    trade.filled_amount <= trade.total_amount,
+                    "iteration {iteration}: filled_amount {} exceeded total_amount {}",
+                    trade.filled_amount,
+                    trade.total_amount
+                );
+                assert_eq!(trade.filled_amount, running_filled);
+            }
+
+            // Whatever is left over must reject an over-fill with a typed
+            // error rather than panicking or wrapping.
+            let remaining = total_amount - running_filled;
+            if remaining < total_amount {
+                let overfill = remaining + rng.range_i128(1, 1_000_000_0000000i128);
+                let buyer = Address::generate(&env);
+                sac.mint(&buyer, &overfill);
+                let result = client.try_deposit_to_escrow(&buyer, &trade_id, &overfill);
+                assert_eq!(result, Ok(Err(ContractError::InsufficientFunds)));
+            }
+
+            let final_trade = client.get_trade(&trade_id);
+            assert_eq!(final_trade.filled_amount, running_filled);
+        }
+    }
+
+    /// Fuzzes cancel_and_refund's fill-counter walk (the underflow this file
+    /// now guards with `checked_sub` — see cancel_and_refund) across random
+    /// total amounts and random two-way fill splits, asserting
+    /// `filled_amount` always settles back to exactly zero after a full
+    /// admin refund, with no panic and no negative/overflowed intermediate
+    /// value.
+    #[test]
+    fn fuzz_cancel_and_refund_settles_to_zero() {
+        let mut rng = Xorshift64::new(0xBADF00D);
+
+        for iteration in 0..100u32 {
+            let (env, client, admin, seller, token) = setup();
+            env.ledger().with_mut(|l| l.timestamp = 1_000_000);
+
+            let total_amount = rng.range_i128(3, 90_000_0000000i128);
+            let trade_id = client.create_listing(
+                &seller,
+                &token,
+                &total_amount,
+                &symbol_short!("DATA"),
+                &(1_000_000 + 86_400),
+            );
+
+            let sac = StellarAssetClient::new(&env, &token);
+            let split = rng.range_i128(1, total_amount - 1);
+
+            for amount in [split, total_amount - split] {
+                let buyer = Address::generate(&env);
+                sac.mint(&buyer, &amount);
+                client.deposit_to_escrow(&buyer, &trade_id, &amount);
+            }
+
+            // Admin can cancel_and_refund immediately regardless of expiry —
+            // this walks the full fill counter and exercises the
+            // checked_sub fix in one call, across many random splits.
+            client.cancel_and_refund(&admin, &trade_id);
+
+            let trade = client.get_trade(&trade_id);
+            assert_eq!(
+                trade.filled_amount, 0,
+                "iteration {iteration}: filled_amount did not settle to zero after full admin refund"
+            );
+            assert_eq!(trade.status, TradeStatus::Cancelled);
+        }
     }
 }

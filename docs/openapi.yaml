@@ -647,6 +647,9 @@ components:
           type: string
         stellarPublicKey:
           type: string
+        referralCode:
+          type: string
+          example: ABC12345
 
     WalletResponse:
       type: object

@@ -1,7 +1,7 @@
 import { Router, type Response } from "express";
 import { v4 as uuidv4 } from "uuid";
 import pool from "../db";
-import { authenticate, AuthenticatedRequest } from "../middleware/authenticate";
+import { authenticate, optionalAuthenticate, AuthenticatedRequest } from "../middleware/authenticate";
 import { validate } from "../middleware/validate";
 import {
   createListing,
@@ -20,9 +20,11 @@ import {
   buyTradeSchema,
   paginationSchema,
   createRatingSchema,
+  disputeSchema,
   type CreateTradeInput,
   type BuyTradeInput,
   type CreateRatingInput,
+  type DisputeInput,
 } from "../schemas";
 
 /**
@@ -55,8 +57,10 @@ router.get(
     const { page, limit } = parsed.data;
     const offset = (page - 1) * limit;
 
-    // Public feed: the seller is exposed only as an opaque display handle.
-    // `seller_id` is intentionally not selected (issue #330).
+    // Join ratings on reviewee_display_id so the count survives account
+    // anonymisation (issue #362).  The display_id is captured at rating
+    // creation time and is never modified by the anonymisation job, unlike
+    // the raw UUID which becomes a dangling reference once PII is scrubbed.
     const { rows: trades } = await pool.query<
       PublicTradeOffer & {
         seller_average_rating: number;
@@ -83,7 +87,7 @@ router.get(
        LEFT JOIN LATERAL (
          SELECT AVG(stars)::numeric(4,2) AS avg_stars, COUNT(*)::int AS review_count
          FROM ratings
-         WHERE reviewee_id = t.seller_id
+         WHERE reviewee_display_id = t.seller_id::text
        ) sr ON TRUE
        WHERE t.status = 'Active' AND t.expires_at > NOW()
        ORDER BY t.created_at DESC
@@ -121,6 +125,28 @@ router.post(
   async (req, res) => {
     const { assetType, amount, expiresInHours } = req.body as CreateTradeInput;
     const { sub: sellerId, stellarPublicKey } = (req as unknown as AuthenticatedRequest).user;
+
+    // KYC gate: a seller must be verified before they can list a trade. This
+    // is checked here rather than only relying on the frontend, since the
+    // frontend check can be bypassed by calling the API directly.
+    const { rows: kycRows } = await pool.query<{ kyc_status: string | null }>(
+      `SELECT kyc_status FROM users WHERE id = $1 LIMIT 1`,
+      [sellerId]
+    );
+
+    if (!kycRows.length) {
+      res.status(404).json({ error: "User not found" });
+      return;
+    }
+
+    if (kycRows[0]!.kyc_status !== "verified") {
+      res.status(403).json({
+        error:
+          "KYC verification is required before creating a trade listing. " +
+          "Submit your KYC documents via POST /api/kyc/submit.",
+      });
+      return;
+    }
 
     // Fetch seller's encrypted secret key from their wallet record
     const { rows: walletRows } = await pool.query<{
@@ -166,23 +192,31 @@ router.post(
 // GET /api/v1/trades/:id
 // ---------------------------------------------------------------------------
 
+/**
+ * This route is intentionally public (no `authenticate`) so shared trade
+ * links and SSR page loads work without a session — but that also means
+ * anyone who knows (or guesses) a trade UUID could read it. `feeAmount` and
+ * `sellerNetAmount` are the platform's internal financial breakdown for the
+ * trade (fee taken, seller's net payout) and aren't shown anywhere in the
+ * public UI, so they're now only included when the caller authenticates
+ * (via `optionalAuthenticate`) as the trade's own buyer or seller. Every
+ * other field (status, asset type, amount, buyer/seller ids, escrow tx hash)
+ * stays public: they're either needed for the public trade page to render
+ * at all, or — like the escrow transaction hash — already treated as public,
+ * on-chain information elsewhere in this app (see the frontend's unguarded
+ * "Escrow Transaction" explorer link).
+ */
 router.get(
   "/:id",
+  optionalAuthenticate,
   async (req, res) => {
     const { id } = req.params;
 
-    // The detail view keeps `seller_id` (the UI needs it for ownership) but
-    // also returns the opaque display handle for rendering (issue #330).
     const { rows } = await pool.query<
-      TradeOffer & { seller_handle: string | null }
+      TradeOffer & { feeAmount: number | null; sellerNetAmount: number | null }
     >(
-      `SELECT t.*,
-              t.fee_amount AS "feeAmount",
-              t.seller_net_amount AS "sellerNetAmount",
-              u.display_handle AS seller_handle
-         FROM trade_offers t
-         LEFT JOIN users u ON u.id = t.seller_id
-        WHERE t.id = $1`,
+      `SELECT *, fee_amount AS "feeAmount", seller_net_amount AS "sellerNetAmount"
+         FROM trade_offers WHERE id = $1`,
       [id]
     );
 
@@ -191,7 +225,20 @@ router.get(
       return;
     }
 
-    res.status(200).json({ data: rows[0] });
+    const trade = rows[0]!;
+    const caller = (req as unknown as AuthenticatedRequest).user as
+      | AuthenticatedRequest["user"]
+      | undefined;
+    const isParty =
+      !!caller && (caller.sub === trade.seller_id || caller.sub === trade.buyer_id);
+
+    if (isParty) {
+      res.status(200).json({ data: trade });
+      return;
+    }
+
+    const { feeAmount: _feeAmount, sellerNetAmount: _sellerNetAmount, ...publicTrade } = trade;
+    res.status(200).json({ data: publicTrade });
   }
 );
 
@@ -375,20 +422,11 @@ router.post(
 router.post(
   "/:id/dispute",
   authenticate,
+  validate(disputeSchema),
   asyncHandler(async (req, res) => {
     const { id } = req.params;
     const { sub: userId } = (req as unknown as AuthenticatedRequest).user;
-    const { reason } = (req.body ?? {}) as { reason?: string };
-
-    if (!reason || typeof reason !== "string" || !reason.trim()) {
-      res.status(400).json({ error: "Dispute reason is required" });
-      return;
-    }
-
-    if (reason.trim().length > 500) {
-      res.status(400).json({ error: "Dispute reason cannot exceed 500 characters" });
-      return;
-    }
+    const { reason } = req.body as DisputeInput;
 
     // Fetch the trade offer
     const { rows: tradeRows } = await pool.query<TradeOffer>(
@@ -484,12 +522,29 @@ router.post(
       return;
     }
 
+    // Resolve the seller's stable display identifier at rating creation time.
+    // We capture it now so the rating remains retrievable even after the
+    // seller's account is anonymised and their phone is replaced with a hash
+    // (issue #362).  The display_id is the seller's phone (or the anonymised
+    // hash if the account has already been scrubbed) — it never changes after
+    // it is written here, giving the LATERAL join in GET /trades a stable key.
+    const { rows: sellerRows } = await pool.query<{ phone: string }>(
+      `SELECT phone FROM users WHERE id = $1 LIMIT 1`,
+      [trade.seller_id]
+    );
+
+    // Fall back to the raw UUID text if the seller row has somehow been
+    // removed — this should not happen due to FK CASCADE, but guards against
+    // a split-second race between deletion and rating.
+    const revieweeDisplayId =
+      sellerRows[0]?.phone?.trim() || trade.seller_id;
+
     try {
       const { rows } = await pool.query(
-        `INSERT INTO ratings (trade_id, reviewer_id, reviewee_id, stars, comment)
-         VALUES ($1, $2, $3, $4, $5)
+        `INSERT INTO ratings (trade_id, reviewer_id, reviewee_id, reviewee_display_id, stars, comment)
+         VALUES ($1, $2, $3, $4, $5, $6)
          RETURNING *`,
-        [tradeId, reviewerId, trade.seller_id, stars, comment ?? null]
+        [tradeId, reviewerId, trade.seller_id, revieweeDisplayId, stars, comment ?? null]
       );
 
       res.status(201).json({ data: rows[0] });

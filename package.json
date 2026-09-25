@@ -8,6 +8,7 @@
     "lint": "turbo run lint",
     "test": "turbo run test",
     "load:test": "bash tests/load/run-all.sh",
+    "load:compare": "node tests/load/compare-baseline.mjs",
     "clean": "turbo run clean"
   },
   "devDependencies": {
