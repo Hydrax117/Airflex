@@ -570,6 +570,42 @@ impl EscrowContract {
     }
 
     // -----------------------------------------------------------------------
+    // close_expired_listing
+    // -----------------------------------------------------------------------
+
+    /// Removes an unfilled listing after its expiry so its persistent storage
+    /// can be reclaimed. Anyone may trigger this cleanup.
+    pub fn close_expired_listing(
+        env: Env,
+        trade_id: u64,
+    ) -> Result<(), ContractError> {
+        let mut trade: TradeOffer = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Trade(trade_id))
+            .ok_or(ContractError::TradeNotFound)?;
+
+        if trade.status != TradeStatus::Open {
+            return Err(ContractError::WrongStatus);
+        }
+
+        if env.ledger().timestamp() < trade.expires_at {
+            return Err(ContractError::TradeExpired);
+        }
+
+        trade.status = TradeStatus::Cancelled;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Trade(trade_id), &trade);
+        env.storage()
+            .persistent()
+            .remove(&DataKey::Trade(trade_id));
+        env.events()
+            .publish((topic_cancelled(),), (trade_id,));
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
     // flag_dispute
     // -----------------------------------------------------------------------
 
@@ -1002,6 +1038,65 @@ mod test {
 
         let token_client = TokenClient::new(&env, &token);
         assert_eq!(token_client.balance(&buyer), 10_000_0000000i128);
+    }
+
+    #[test]
+    fn test_close_expired_open_listing_removes_storage() {
+        let (env, client, _admin, seller, _buyer, token) = setup();
+        env.ledger().with_mut(|l| l.timestamp = 1_000_000);
+
+        let trade_id = client.create_listing(
+            &seller,
+            &token,
+            &500_0000000i128,
+            &symbol_short!("AIRTIME"),
+            &(1_000_000 + 86_400),
+        );
+
+        env.ledger().with_mut(|l| l.timestamp = 1_000_000 + 86_400);
+        client.close_expired_listing(&trade_id);
+
+        assert_eq!(client.try_get_trade(&trade_id), Ok(Err(ContractError::TradeNotFound)));
+    }
+
+    #[test]
+    fn test_close_expired_listing_rejects_unexpired_listing() {
+        let (env, client, _admin, seller, _buyer, token) = setup();
+        env.ledger().with_mut(|l| l.timestamp = 1_000_000);
+
+        let trade_id = client.create_listing(
+            &seller,
+            &token,
+            &500_0000000i128,
+            &symbol_short!("AIRTIME"),
+            &(1_000_000 + 86_400),
+        );
+
+        let result = client.try_close_expired_listing(&trade_id);
+
+        assert_eq!(result, Ok(Err(ContractError::TradeExpired)));
+        assert_eq!(client.get_trade(&trade_id).status, TradeStatus::Open);
+    }
+
+    #[test]
+    fn test_close_expired_listing_rejects_filled_listing() {
+        let (env, client, _admin, seller, buyer, token) = setup();
+        env.ledger().with_mut(|l| l.timestamp = 1_000_000);
+
+        let trade_id = client.create_listing(
+            &seller,
+            &token,
+            &500_0000000i128,
+            &symbol_short!("AIRTIME"),
+            &(1_000_000 + 86_400),
+        );
+        client.deposit_to_escrow(&buyer, &trade_id, &500_0000000i128);
+        env.ledger().with_mut(|l| l.timestamp = 1_000_000 + 86_400);
+
+        let result = client.try_close_expired_listing(&trade_id);
+
+        assert_eq!(result, Ok(Err(ContractError::WrongStatus)));
+        assert_eq!(client.get_trade(&trade_id).status, TradeStatus::Locked);
     }
 
     // -----------------------------------------------------------------------
