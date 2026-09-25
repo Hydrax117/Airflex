@@ -13,6 +13,7 @@ import { useCallback, useEffect, useState } from "react";
 
 import {
   useTradeNotifications,
+  type ConnectionState,
   type TradeNotification,
 } from "../hooks/useTradeNotifications";
 
@@ -36,6 +37,42 @@ function statusLabel(status: string): string {
       return "Trade cancelled";
     default:
       return `Trade ${status}`;
+  }
+}
+
+/**
+ * Human wording for the stream's state.
+ *
+ * The raw state names are internal; "reconnecting" in particular needs to read
+ * as something happening on the user's behalf rather than an error, because it
+ * is the state a user lands in every time the server restarts.
+ */
+function connectionLabel(state: ConnectionState): string {
+  switch (state) {
+    case "open":
+      return "Live";
+    case "connecting":
+      return "Connecting…";
+    case "reconnecting":
+      return "Reconnecting…";
+    case "failed":
+      return "Disconnected";
+    default:
+      return "Idle";
+  }
+}
+
+function connectionTone(state: ConnectionState): string {
+  switch (state) {
+    case "open":
+      return "text-emerald-400";
+    case "failed":
+      return "text-red-400";
+    case "connecting":
+    case "reconnecting":
+      return "text-amber-400";
+    default:
+      return "text-zinc-500";
   }
 }
 
@@ -63,6 +100,8 @@ export function NotificationTray(): JSX.Element {
 
   const { notifications, unreadCount, connectionState, markAllRead, clearAll } =
     useTradeNotifications(handleNotify);
+
+  const reconnecting = connectionState === "reconnecting";
 
   // Expire toasts on a single interval rather than one timer per toast: a
   // timer per toast leaks if the component unmounts mid-flight, and the
@@ -114,9 +153,13 @@ export function NotificationTray(): JSX.Element {
             if (!open) markAllRead();
           }}
           aria-label={
-            unreadCount > 0
-              ? `Notifications, ${unreadCount} unread`
-              : "Notifications"
+            reconnecting
+              ? `Notifications, reconnecting${
+                  unreadCount > 0 ? `, ${unreadCount} unread` : ""
+                }`
+              : unreadCount > 0
+                ? `Notifications, ${unreadCount} unread`
+                : "Notifications"
           }
           aria-expanded={open}
           className="relative rounded-lg p-2 text-zinc-300 transition-colors hover:bg-white/10"
@@ -141,6 +184,17 @@ export function NotificationTray(): JSX.Element {
               {unreadCount > 9 ? "9+" : unreadCount}
             </span>
           )}
+
+          {/* A pulsing dot rather than a banner: the stream dropping is worth
+              noticing, but it recovers on its own and should not read as an
+              error the user has to act on. */}
+          {reconnecting && (
+            <span
+              data-testid="tray-reconnecting-dot"
+              title="Reconnecting…"
+              className="absolute -bottom-0.5 -right-0.5 h-2 w-2 animate-pulse rounded-full bg-amber-400"
+            />
+          )}
         </button>
 
         {open && (
@@ -151,15 +205,13 @@ export function NotificationTray(): JSX.Element {
                 {/* Surfaced rather than hidden: a user wondering why updates
                     stopped should be able to see that the stream dropped. */}
                 <span
-                  className={`text-[10px] uppercase tracking-wide ${
-                    connectionState === "open"
-                      ? "text-emerald-400"
-                      : connectionState === "failed"
-                        ? "text-red-400"
-                        : "text-zinc-500"
-                  }`}
+                  role="status"
+                  aria-live="polite"
+                  className={`text-[10px] uppercase tracking-wide ${connectionTone(
+                    connectionState
+                  )}`}
                 >
-                  {connectionState}
+                  {connectionLabel(connectionState)}
                 </span>
                 {notifications.length > 0 && (
                   <button

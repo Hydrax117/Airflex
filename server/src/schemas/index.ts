@@ -20,9 +20,11 @@ export {
   createTradeSchema,
   buyTradeSchema,
   paginationSchema,
+  disputeSchema,
   type CreateTradeInput,
   type BuyTradeInput,
   type PaginationInput,
+  type DisputeInput,
 } from "./trade.schemas";
 
 export {

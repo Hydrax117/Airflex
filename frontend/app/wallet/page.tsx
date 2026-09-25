@@ -1,9 +1,9 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useTranslations } from "next-intl";
 import { getToken, isAuthenticated } from "../lib/auth";
-import DepositModal from "./DepositModal";
+import DepositModal, { type VirtualAccount } from "./DepositModal";
 import WithdrawModal from "./WithdrawModal";
 import { Button } from "../../components/ui/Button";
 import { Badge } from "../../components/ui/Badge";
@@ -27,6 +27,7 @@ interface WalletResponse {
   balance?: string;
   asset?: string;
   network?: string;
+  virtualAccount?: VirtualAccount | null;
   error?: string;
 }
 
@@ -39,6 +40,26 @@ interface WalletTransaction {
   created_at: string;
 }
 
+interface TradesResponse {
+  data?: WalletTransaction[];
+  pagination?: {
+    page: number;
+    limit: number;
+    total: number;
+    totalPages: number;
+  };
+  error?: string;
+}
+
+/**
+ * Rows per page (Issue #336).
+ *
+ * The endpoint already paginates; the page previously asked for a single fixed
+ * window of ten and rendered whatever came back, so a user with a long history
+ * could neither see nor reach the rest of it.
+ */
+const TRADES_PER_PAGE = 10;
+
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
@@ -49,11 +70,18 @@ export default function WalletPage() {
 
   const [authChecked, setAuthChecked] = useState(false);
   const [wallet, setWallet] = useState<WalletData | null>(null);
+  const [virtualAccount, setVirtualAccount] = useState<VirtualAccount | null>(null);
   const [transactions, setTransactions] = useState<WalletTransaction[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isDepositOpen, setIsDepositOpen] = useState(false);
+
+  // Trade history paging (Issue #336)
+  const [page, setPage] = useState(1);
+  const [totalTrades, setTotalTrades] = useState(0);
+  const [totalPages, setTotalPages] = useState(1);
+  const [tradesLoading, setTradesLoading] = useState(false);
 
   // Auth guard
   useEffect(() => {
@@ -64,7 +92,7 @@ export default function WalletPage() {
     setAuthChecked(true);
   }, []);
 
-  // Fetch wallet data & transactions
+  // Fetch wallet data
   useEffect(() => {
     if (!authChecked) return;
 
@@ -74,17 +102,11 @@ export default function WalletPage() {
     setLoading(true);
     setError(null);
 
-    Promise.all([
-      fetch(`${apiUrl}/api/v1/wallet`, {
-        headers: { Authorization: `Bearer ${token}` },
-      }).then((r) => r.json() as Promise<WalletResponse>),
-      fetch(`${apiUrl}/api/v1/profile/trades?limit=10`, {
-        headers: { Authorization: `Bearer ${token}` },
-      })
-        .then((r) => (r.ok ? r.json() : { data: [] }))
-        .catch(() => ({ data: [] })),
-    ])
-      .then(([data, tradesData]) => {
+    fetch(`${apiUrl}/api/v1/wallet`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then((r) => r.json() as Promise<WalletResponse>)
+      .then((data) => {
         if (data.error || !data.publicKey) {
           setError(data.error ?? t("loadFailed"));
         } else {
@@ -94,14 +116,44 @@ export default function WalletPage() {
             asset: data.asset ?? "XLM",
             network: data.network ?? "testnet",
           });
-          if (tradesData && Array.isArray(tradesData.data)) {
-            setTransactions(tradesData.data);
-          }
+          setVirtualAccount(data.virtualAccount ?? null);
         }
       })
       .catch(() => setError(t("networkError")))
       .finally(() => setLoading(false));
   }, [authChecked, apiUrl, t]);
+
+  // Fetch one page of trade history — re-runs whenever the page changes.
+  // A failure here leaves the wallet card usable: the history is secondary.
+  const fetchTrades = useCallback(() => {
+    const token = getToken();
+    if (!token) return;
+
+    setTradesLoading(true);
+
+    const params = new URLSearchParams({
+      page: String(page),
+      limit: String(TRADES_PER_PAGE),
+    });
+
+    fetch(`${apiUrl}/api/v1/profile/trades?${params.toString()}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then((r) => (r.ok ? (r.json() as Promise<TradesResponse>) : { data: [] }))
+      .catch(() => ({ data: [] }) as TradesResponse)
+      .then((tradesData) => {
+        setTransactions(Array.isArray(tradesData.data) ? tradesData.data : []);
+        if (tradesData.pagination) {
+          setTotalTrades(tradesData.pagination.total);
+          setTotalPages(Math.max(tradesData.pagination.totalPages, 1));
+        }
+      })
+      .finally(() => setTradesLoading(false));
+  }, [apiUrl, page]);
+
+  useEffect(() => {
+    if (authChecked) fetchTrades();
+  }, [authChecked, fetchTrades]);
 
   function handleWithdrawSuccess() {
     // Refresh wallet data after successful withdrawal
@@ -121,11 +173,19 @@ export default function WalletPage() {
             asset: data.asset ?? "XLM",
             network: data.network ?? "testnet",
           });
+          setVirtualAccount(data.virtualAccount ?? null);
         }
       })
       .catch(() => setError(t("refreshFailed")))
       .finally(() => setLoading(false));
   }
+
+  // Range shown on this page. Derived from the server's total rather than the
+  // rows in hand, so the last page reads "41–47 of 47" and not "41–50".
+  const rangeStart = totalTrades === 0 ? 0 : (page - 1) * TRADES_PER_PAGE + 1;
+  const rangeEnd = Math.min(page * TRADES_PER_PAGE, totalTrades);
+  const canGoPrevious = page > 1 && !tradesLoading;
+  const canGoNext = page < totalPages && !tradesLoading;
 
   if (!authChecked || loading) {
     return (
@@ -219,7 +279,11 @@ Stellar Public Key (On-chain Account)
           <CardTitle>Recent Transactions</CardTitle>
         </CardHeader>
         <CardContent className="p-0">
-          {transactions.length === 0 ? (
+          {tradesLoading && transactions.length === 0 ? (
+            <div className="flex justify-center px-6 py-8">
+              <Spinner label="Loading transactions…" />
+            </div>
+          ) : transactions.length === 0 ? (
             <div className="px-6 py-8 text-center text-sm text-gray-500 dark:text-gray-400">
               No transactions found on this account yet.
             </div>
@@ -270,6 +334,42 @@ Stellar Public Key (On-chain Account)
               </table>
             </div>
           )}
+
+          {/* Pagination controls (Issue #336) */}
+          {totalTrades > 0 && (
+            <div className="flex flex-col items-center justify-between gap-3 border-t border-gray-100 px-6 py-4 sm:flex-row dark:border-gray-700/60">
+              <p
+                data-testid="trades-range"
+                aria-live="polite"
+                className="text-xs text-gray-500 dark:text-gray-400"
+              >
+                Showing {rangeStart}–{rangeEnd} of {totalTrades}{" "}
+                {totalTrades === 1 ? "trade" : "trades"}
+              </p>
+
+              <nav className="flex items-center gap-2" aria-label="Trade history pages">
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => setPage((current) => Math.max(1, current - 1))}
+                  disabled={!canGoPrevious}
+                >
+                  Previous
+                </Button>
+                <span className="text-xs text-gray-500 dark:text-gray-400">
+                  Page {page} of {totalPages}
+                </span>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => setPage((current) => Math.min(totalPages, current + 1))}
+                  disabled={!canGoNext}
+                >
+                  Next
+                </Button>
+              </nav>
+            </div>
+          )}
         </CardContent>
       </Card>
 
@@ -278,6 +378,7 @@ Stellar Public Key (On-chain Account)
         isOpen={isDepositOpen}
         onClose={() => setIsDepositOpen(false)}
         onDepositSuccess={handleWithdrawSuccess}
+        virtualAccount={virtualAccount}
       />
 
       {/* Withdraw Modal */}

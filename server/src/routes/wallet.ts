@@ -1,7 +1,7 @@
 import { Router } from "express";
 import pool from "../db";
 import { authenticate, AuthenticatedRequest } from "../middleware/authenticate";
-import { getWalletBalance } from "../services/stellar";
+import { decryptSecret, getWalletBalance } from "../services/stellar";
 import { NotificationService } from "../services/notifications";
 
 // ---------------------------------------------------------------------------
@@ -93,8 +93,12 @@ async function resolvePaystackAccount(
       span.setAttribute("paystack.bank_code", bankCode);
       // Do NOT record the account_number — it is PII
       try {
+        const params = new URLSearchParams({
+          account_number: accountNumber,
+          bank_code: bankCode,
+        });
         const response = await fetch(
-          `https://api.paystack.co/bank/resolve?account_number=${accountNumber}&bank_code=${bankCode}`,
+          `https://api.paystack.co/bank/resolve?${params.toString()}`,
           {
             headers: { Authorization: `Bearer ${paystackSecretKey}` },
           }
@@ -323,6 +327,108 @@ router.post(
     });
 
     res.status(200).json({ success: true });
+  }
+);
+
+// ---------------------------------------------------------------------------
+// POST /api/v1/wallet/unlock  (authenticated)
+// ---------------------------------------------------------------------------
+
+/**
+ * Per-user throttle for key release.
+ *
+ * Deliberately in-memory, unlike `rateLimitOtp`'s database-backed counter.
+ * There is no cost or victim-harassment angle here — the caller can only ever
+ * unlock their own key, which they are already entitled to — so the limit
+ * exists to blunt a scripted loop, not to be an authorization boundary. A
+ * counter that resets on deploy is adequate for that and does not need a
+ * migration. Authorization is `authenticate`, and that is not per-process.
+ */
+const UNLOCK_MAX_PER_WINDOW = 10;
+const UNLOCK_WINDOW_MS = 60_000;
+const unlockAttempts = new Map<string, number[]>();
+
+function unlockAllowed(userId: string): boolean {
+  const now = Date.now();
+  const recent = (unlockAttempts.get(userId) ?? []).filter(
+    (at) => now - at < UNLOCK_WINDOW_MS
+  );
+  recent.push(now);
+  unlockAttempts.set(userId, recent);
+  return recent.length <= UNLOCK_MAX_PER_WINDOW;
+}
+
+/**
+ * Releases the caller's own Stellar secret key so their browser can sign
+ * transactions locally (Issue #342).
+ *
+ * # Why this endpoint exists
+ *
+ * The buy flow used to collect the buyer's secret key in a plaintext input and
+ * POST it with the trade request, putting it in the DOM, in form autocomplete,
+ * and in server request logs. Signing in the browser removes all of that — but
+ * the wallet is custodial today (`generateAndFundWallet` encrypts the secret
+ * into the `wallets` table), so the browser has no key to sign with unless the
+ * server hands the owner theirs.
+ *
+ * # The trade-off, stated plainly
+ *
+ * This moves a custodial key into client memory. That is a real change in
+ * exposure and it is not free. It is still the better side of the trade: the
+ * key stops travelling inside trade requests, stops being typed into a form,
+ * and stops being logged — and it is the step the code's own TODOs call for
+ * on the way to non-custodial wallets, where this endpoint disappears entirely
+ * because the server never had the key.
+ *
+ * The response is never cached, and the client holds the key in memory only
+ * (see `frontend/app/lib/stellarSession.ts`) — never localStorage, never a
+ * form field, never a URL.
+ */
+router.post(
+  "/unlock",
+  authenticate,
+  async (req, res) => {
+    const { sub: userId } = (req as AuthenticatedRequest).user;
+
+    if (!unlockAllowed(userId)) {
+      res.setHeader("Retry-After", String(Math.ceil(UNLOCK_WINDOW_MS / 1000)));
+      res.status(429).json({ error: "Too many unlock requests. Try again shortly." });
+      return;
+    }
+
+    const { rows } = await pool.query<{
+      stellar_public_key: string;
+      stellar_secret_key: string;
+    }>(
+      `SELECT stellar_public_key, stellar_secret_key FROM wallets WHERE user_id = $1 LIMIT 1`,
+      [userId]
+    );
+
+    const wallet = rows[0];
+    if (!wallet?.stellar_secret_key) {
+      res.status(404).json({ error: "Wallet not found" });
+      return;
+    }
+
+    let secretKey: string;
+    try {
+      secretKey = decryptSecret(wallet.stellar_secret_key);
+    } catch (err) {
+      console.error("[wallet] Failed to decrypt secret key:", (err as Error).message);
+      res.status(500).json({ error: "Unable to unlock wallet" });
+      return;
+    }
+
+    // Leave a trail: key release is worth being able to reconstruct later.
+    console.info(`[wallet] Released signing key to owner user_id=${userId}`);
+
+    res.setHeader("Cache-Control", "no-store");
+    res.status(200).json({
+      data: {
+        publicKey: wallet.stellar_public_key,
+        secretKey,
+      },
+    });
   }
 );
 

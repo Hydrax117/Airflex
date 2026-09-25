@@ -28,6 +28,12 @@ pub enum DataKey {
 pub enum ListingStatus {
     Active,
     Sold,
+    /// Payment has been released to the seller after delivery was confirmed.
+    /// Distinct from `Sold` so a completed sale can be told apart from one
+    /// still awaiting release — release_payment used to leave a listing in
+    /// `Sold` forever, making the two indistinguishable and leaving nothing
+    /// to stop `release_payment` being called again on the same listing.
+    Released,
     Cancelled,
 }
 
@@ -51,6 +57,10 @@ pub struct Listing {
     pub status: ListingStatus,
     pub created_at: u64,       // ledger timestamp
     pub expires_at: u64,       // listing expiry
+    /// Set by deposit_to_escrow once a buyer locks funds. Used by
+    /// resolve_dispute to confirm a recipient is actually a party to the
+    /// trade before funds are moved to them.
+    pub buyer: Option<Address>,
 }
 
 #[contracttype]
@@ -93,12 +103,16 @@ pub enum ContractError {
 // Events
 // ---------------------------------------------------------------------------
 
-fn topic_listed()    -> Symbol { symbol_short!("listed")    }
-fn topic_sold()      -> Symbol { symbol_short!("sold")      }
-fn topic_cancelled() -> Symbol { symbol_short!("cancelled") }
-fn topic_contract()  -> Symbol { symbol_short!("contract")  }
-fn topic_paused()    -> Symbol { symbol_short!("paused")    }
-fn topic_unpaused()  -> Symbol { symbol_short!("unpaused")  }
+// Event topics defined with `symbol_short!` are limited to at most 9 ASCII
+// characters (e.g. "cancelled" is exactly 9 chars, at the limit).
+// Any topic strings approaching or exceeding 9 characters must use `Symbol::new(env, "...")`
+// to avoid compile-time macro panics.
+fn topic_listed()    -> Symbol { symbol_short!("listed")    } // 6 chars
+fn topic_sold()      -> Symbol { symbol_short!("sold")      } // 4 chars
+fn topic_cancelled() -> Symbol { symbol_short!("cancelled") } // 9 chars (max limit for symbol_short!)
+fn topic_contract()  -> Symbol { symbol_short!("contract")  } // 8 chars
+fn topic_paused()    -> Symbol { symbol_short!("paused")    } // 6 chars
+fn topic_unpaused()  -> Symbol { symbol_short!("unpaused")  } // 8 chars
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -257,6 +271,7 @@ impl MarketplaceContract {
             status: ListingStatus::Active,
             created_at: now,
             expires_at,
+            buyer: None,
         };
 
         env.storage()
@@ -311,6 +326,7 @@ impl MarketplaceContract {
         token_client.transfer(&buyer, &env.current_contract_address(), &listing.price);
 
         listing.status = ListingStatus::Sold;
+        listing.buyer = Some(buyer.clone());
 
         env.storage()
             .persistent()
@@ -335,7 +351,7 @@ impl MarketplaceContract {
         let admin = get_admin(&env)?;
         admin.require_auth();
 
-        let listing: Listing = env
+        let mut listing: Listing = env
             .storage()
             .persistent()
             .get(&DataKey::Listing(listing_id))
@@ -351,6 +367,15 @@ impl MarketplaceContract {
             &listing.seller,
             &listing.price,
         );
+
+        // Previously the listing was never re-saved here, so it stayed
+        // `Sold` forever — indistinguishable from a listing whose payment had
+        // not yet been released, and with nothing stopping this function
+        // being called again on the same listing to drain it a second time.
+        listing.status = ListingStatus::Released;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Listing(listing_id), &listing);
 
         update_reputation(&env, &listing.seller, listing.price, false);
 
@@ -433,6 +458,17 @@ impl MarketplaceContract {
             return Err(ContractError::WrongStatus);
         }
 
+        // `recipient` must be a known party to this specific trade — either
+        // the seller (a release) or the buyer who actually deposited into
+        // escrow (a refund). Without this check the admin key could move a
+        // listing's escrowed funds to any arbitrary address, since nothing
+        // here previously tied `recipient` back to the trade at all.
+        let is_seller = recipient == listing.seller;
+        let is_buyer = listing.buyer.as_ref() == Some(&recipient);
+        if !is_seller && !is_buyer {
+            return Err(ContractError::NotAParty);
+        }
+
         let token_client = token::Client::new(&env, &listing.token);
         token_client.transfer(
             &env.current_contract_address(),
@@ -447,7 +483,6 @@ impl MarketplaceContract {
             .set(&DataKey::Listing(listing_id), &listing);
 
         // If recipient is the seller, count as completed; otherwise disputed
-        let is_seller = recipient == listing.seller;
         update_reputation(&env, &listing.seller, listing.price, !is_seller);
 
         env.events()
@@ -987,5 +1022,39 @@ mod test {
         // Listing is Active, not Sold
         let result = client.try_cancel_and_refund(&buyer, &listing_id);
         assert_eq!(result, Ok(Err(ContractError::WrongStatus)));
+    }
+
+    #[test]
+    fn test_event_topic_lengths_and_long_topic_handling() {
+        let env = Env::default();
+
+        // Compile-time & runtime verification that symbol_short! topics stay within <= 9 chars
+        const SHORT_TOPICS: &[&str] = &[
+            "listed",
+            "sold",
+            "cancelled",
+            "contract",
+            "paused",
+            "unpaused",
+        ];
+
+        for topic in SHORT_TOPICS {
+            assert!(
+                topic.len() <= 9,
+                "symbol_short! topic '{topic}' exceeds 9 characters"
+            );
+        }
+
+        // Test topic functions
+        let _ = topic_listed();
+        let _ = topic_sold();
+        let _ = topic_cancelled();
+        let _ = topic_contract();
+        let _ = topic_paused();
+        let _ = topic_unpaused();
+
+        // Verify that longer/new topics (> 9 chars, e.g. "emergency_withdrawal") work with Symbol::new(&env, ...)
+        let long_topic = Symbol::new(&env, "emergency_withdrawal");
+        assert_eq!(long_topic, Symbol::new(&env, "emergency_withdrawal"));
     }
 }

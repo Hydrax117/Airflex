@@ -41,11 +41,97 @@ interface InitializeResponse {
   error?: string;
 }
 
+/** The user's dedicated NGN account, as returned by `GET /api/v1/wallet`. */
+export interface VirtualAccount {
+  accountNumber: string;
+  bankName: string | null;
+}
+
 interface DepositModalProps {
   isOpen: boolean;
   onClose: () => void;
   /** Called once the deposit has been confirmed, so the page can refresh. */
   onDepositSuccess: () => void;
+  /** Null while Paystack is still provisioning the account. */
+  virtualAccount?: VirtualAccount | null;
+}
+
+/** How long the copy button stays in its confirmed state (Issue #335). */
+export const COPIED_FEEDBACK_MS = 2_000;
+
+/**
+ * Copy-to-clipboard control for the virtual account number (Issue #335).
+ *
+ * Users transfer from a bank app on the same phone, where selecting text
+ * inside a modal is fiddly and a mistyped digit sends money nowhere
+ * recoverable — so the number is never meant to be retyped by hand.
+ */
+export function CopyAccountNumberButton({
+  accountNumber,
+}: {
+  accountNumber: string;
+}) {
+  const [copied, setCopied] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const resetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // A timer left running after unmount would set state on a dead component.
+  useEffect(
+    () => () => {
+      if (resetTimer.current) clearTimeout(resetTimer.current);
+    },
+    [],
+  );
+
+  async function handleCopy() {
+    try {
+      await navigator.clipboard.writeText(accountNumber);
+      setFailed(false);
+      setCopied(true);
+      if (resetTimer.current) clearTimeout(resetTimer.current);
+      resetTimer.current = setTimeout(() => setCopied(false), COPIED_FEEDBACK_MS);
+    } catch {
+      // Clipboard access can be denied outright (insecure origin, permission
+      // policy). Say so rather than silently doing nothing, so the user knows
+      // to select the number manually.
+      setCopied(false);
+      setFailed(true);
+    }
+  }
+
+  return (
+    <div className="flex flex-col items-end gap-1">
+      <button
+        type="button"
+        onClick={handleCopy}
+        aria-label={`Copy account number ${accountNumber}`}
+        className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-gray-300 px-3 py-1.5 text-xs font-semibold text-gray-700 transition-colors hover:bg-gray-100 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-700"
+      >
+        <svg
+          className="h-3.5 w-3.5"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth={2}
+          viewBox="0 0 24 24"
+          aria-hidden="true"
+          data-testid="copy-icon"
+        >
+          <path
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"
+          />
+        </svg>
+        {copied ? "Copied!" : "Copy"}
+      </button>
+
+      {failed && (
+        <span role="alert" className="text-[11px] text-red-600 dark:text-red-400">
+          Could not copy — select the number manually.
+        </span>
+      )}
+    </div>
+  );
 }
 
 type Status = "idle" | "initializing" | "awaiting_payment" | "confirming" | "success";
@@ -112,6 +198,7 @@ export default function DepositModal({
   isOpen,
   onClose,
   onDepositSuccess,
+  virtualAccount = null,
 }: DepositModalProps) {
   const apiUrl = process.env["NEXT_PUBLIC_API_URL"] ?? "http://localhost:3001";
 
@@ -274,53 +361,99 @@ export default function DepositModal({
             </button>
           </div>
         ) : (
-          <form onSubmit={handleSubmit} noValidate>
-            <label
-              htmlFor="deposit-amount"
-              className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300"
-            >
-              Amount
-            </label>
-            <CurrencyInput
-              id="deposit-amount"
-              name="amount"
-              value={amount}
-              min={MIN_DEPOSIT_NAIRA}
-              onChange={(val) => {
-                setAmount(val ? String(val) : "");
-                if (error) setError(null);
-              }}
-              placeholder={`${MIN_DEPOSIT_NAIRA}`}
-              disabled={busy}
-            />
-            <p
-              id="deposit-amount-hint"
-              className="mt-1 text-xs text-gray-500 dark:text-gray-400"
-            >
-              Minimum deposit ₦{MIN_DEPOSIT_NAIRA.toLocaleString()} (NGN)
-            </p>
-
-            {error && (
-              <p
-                role="alert"
-                data-testid="deposit-error"
-                className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700 dark:bg-red-900/30 dark:text-red-300"
+          <>
+            {virtualAccount && (
+              <section
+                aria-labelledby="virtual-account-heading"
+                data-testid="virtual-account"
+                className="mb-5 rounded-xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-700 dark:bg-gray-900/40"
               >
-                {error}
-              </p>
+                <h3
+                  id="virtual-account-heading"
+                  className="text-sm font-semibold text-gray-900 dark:text-gray-100"
+                >
+                  Transfer from your bank
+                </h3>
+                <p className="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
+                  Send money to this account and your wallet is credited
+                  automatically.
+                </p>
+
+                <div className="mt-3 flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <p
+                      data-testid="virtual-account-number"
+                      className="font-mono text-lg font-bold tracking-wider text-gray-900 dark:text-gray-100"
+                    >
+                      {virtualAccount.accountNumber}
+                    </p>
+                    {virtualAccount.bankName && (
+                      <p className="mt-0.5 truncate text-xs text-gray-500 dark:text-gray-400">
+                        {virtualAccount.bankName}
+                      </p>
+                    )}
+                  </div>
+
+                  <CopyAccountNumberButton
+                    accountNumber={virtualAccount.accountNumber}
+                  />
+                </div>
+              </section>
             )}
 
-            <button
-              type="submit"
-              disabled={busy}
-              className="mt-6 inline-flex w-full items-center justify-center rounded-xl bg-violet-600 px-5 py-3 text-sm font-semibold text-white transition-colors hover:bg-violet-700 disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              {status === "initializing" && "Starting…"}
-              {status === "awaiting_payment" && "Waiting for payment…"}
-              {status === "confirming" && "Confirming…"}
-              {status === "idle" && "Continue to Payment"}
-            </button>
-          </form>
+            <form onSubmit={handleSubmit} noValidate>
+              {virtualAccount && (
+                <p className="mb-3 text-xs font-medium uppercase tracking-wide text-gray-400 dark:text-gray-500">
+                  Or pay by card
+                </p>
+              )}
+              <label
+                htmlFor="deposit-amount"
+                className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300"
+              >
+                Amount
+              </label>
+              <CurrencyInput
+                id="deposit-amount"
+                name="amount"
+                value={amount}
+                min={MIN_DEPOSIT_NAIRA}
+                onChange={(val) => {
+                  setAmount(val ? String(val) : "");
+                  if (error) setError(null);
+                }}
+                placeholder={`${MIN_DEPOSIT_NAIRA}`}
+                disabled={busy}
+              />
+              <p
+                id="deposit-amount-hint"
+                className="mt-1 text-xs text-gray-500 dark:text-gray-400"
+              >
+                Minimum deposit ₦{MIN_DEPOSIT_NAIRA.toLocaleString()} (NGN)
+              </p>
+
+              {error && (
+                <p
+                  role="alert"
+                  data-testid="deposit-error"
+                  className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700 dark:bg-red-900/30 dark:text-red-300"
+                >
+                  {error}
+                </p>
+              )}
+
+              <button
+                type="submit"
+                disabled={busy}
+                className="mt-6 inline-flex w-full items-center justify-center rounded-xl bg-violet-600 px-5 py-3 text-sm font-semibold text-white transition-colors hover:bg-violet-700 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {status === "initializing" && "Starting…"}
+                {status === "awaiting_payment" && "Waiting for payment…"}
+                {status === "confirming" && "Confirming…"}
+                {status === "idle" && "Continue to Payment"}
+              </button>
+            </form>
+          </>
         )}
       </div>
     </div>
