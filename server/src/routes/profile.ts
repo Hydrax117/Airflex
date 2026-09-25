@@ -106,8 +106,9 @@ router.get(
       created_at: string;
       stellar_public_key: string | null;
       kyc_status: string | null;
+      referral_code: string | null;
     }>(
-      `SELECT id, phone, created_at, stellar_public_key, kyc_status
+      `SELECT id, phone, created_at, stellar_public_key, kyc_status, referral_code
        FROM users
        WHERE id = $1
        LIMIT 1`,
@@ -138,6 +139,7 @@ router.get(
         totalTradesCompleted,
         stellarPublicKey:     user.stellar_public_key ?? "",
         kycStatus:            user.kyc_status ?? "unverified",
+        referralCode:         user.referral_code ?? "",
       },
     });
   }

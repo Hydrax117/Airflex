@@ -410,6 +410,15 @@ export const openApiDocument = {
               createdAt: { type: "string", format: "date-time" },
               totalTradesCompleted: { type: "integer", example: 5 },
               stellarPublicKey: { type: "string", example: "GABC1234..." },
+              kycStatus: {
+                type: "string",
+                enum: ["unverified", "pending", "verified", "rejected"],
+                example: "verified",
+              },
+              referralCode: {
+                type: "string",
+                example: "ABC12345",
+              },
             },
           },
         },

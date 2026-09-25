@@ -20,6 +20,7 @@ interface ProfileData {
   totalTradesCompleted: number;
   stellarPublicKey: string;
   kycStatus: "unverified" | "pending" | "verified" | "rejected";
+  referralCode?: string;
 }
 
 interface ProfileResponse {
@@ -313,6 +314,7 @@ export default function ProfilePage() {
   const [profile, setProfile]       = useState<ProfileData | null>(null);
   const [profileError, setProfileError] = useState<string | null>(null);
   const [profileLoading, setProfileLoading] = useState(true);
+  const [copiedReferral, setCopiedReferral] = useState(false);
 
   // Trade history
   const [trades, setTrades]         = useState<TradeOffer[]>([]);
@@ -532,6 +534,43 @@ export default function ProfilePage() {
                 className="text-xs font-mono break-all"
                 truncate={false}
               />
+            </Card>
+          )}
+
+          {/* Referral link */}
+          {profile.referralCode && (
+            <Card className="mt-4 flex flex-col gap-3 p-5">
+              <div>
+                <p className="text-xs font-medium text-gray-500 dark:text-gray-400">
+                  Your referral link
+                </p>
+                <p className="text-sm text-gray-700 dark:text-gray-300 mt-0.5">
+                  Share your link with friends to earn rewards when they trade.
+                </p>
+              </div>
+              <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+                <div className="flex-1 rounded-xl border border-gray-200 bg-gray-50 px-4 py-2.5 text-sm font-mono text-gray-800 dark:border-gray-700 dark:bg-gray-900/50 dark:text-gray-200 select-all overflow-x-auto">
+                  {typeof window !== "undefined"
+                    ? `${window.location.origin}/auth/signup?ref=${profile.referralCode}`
+                    : `https://airflex.ng/auth/signup?ref=${profile.referralCode}`}
+                </div>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  onClick={() => {
+                    const link =
+                      typeof window !== "undefined"
+                        ? `${window.location.origin}/auth/signup?ref=${profile.referralCode}`
+                        : `https://airflex.ng/auth/signup?ref=${profile.referralCode}`;
+                    navigator.clipboard?.writeText(link);
+                    setCopiedReferral(true);
+                    setTimeout(() => setCopiedReferral(false), 2000);
+                  }}
+                  className="whitespace-nowrap"
+                >
+                  {copiedReferral ? "Copied! ✓" : "Copy Link"}
+                </Button>
+              </div>
             </Card>
           )}
         </section>
